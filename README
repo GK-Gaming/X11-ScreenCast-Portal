@@ -1,7 +1,10 @@
-Code adapted from xdg-desktop-portal-wlr
+Code adapted from xdg-desktop-portal-wlr (MIT ©emersion)
 And also very messy
 
 You have to download libdrmtap from https://github.com/fxd0h/libdrmtap and modify make.sh (sorry dont have proper makefile yet)
+in make.sh:
+replace the include paths for the libdrmtap library, those point to MY dev directory rn
+
 give the xdg-desktop-portal-x11-session program admin caps (so it can grab the output of the GPU through drmtap)
 using:
 # setcap cap_sys_admin+ep xdg-desktop-portal-x11-session
