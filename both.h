@@ -14,6 +14,12 @@
 
 #define MAX_SESSIONS 20
 
+enum cursor_modes {
+  HIDDEN = 1,
+  EMBEDDED = 2,
+  METADATA = 4,
+};
+
 enum ipc_id {
 	IPC_START_CAP_IN,
 	IPC_START_CAP_OUT,
@@ -24,7 +30,7 @@ enum ipc_id {
 struct ipc_start_capture_input {
 	char device[64];
 	drmtap_display display;
-	bool metadata_cursor;
+	enum cursor_modes cursor_mode;
 };
 struct ipc_start_capture_output {
 	int ret;

@@ -24,7 +24,7 @@ struct pollfd pollfds[MAX_SESSIONS + POLLS] = {
 
 struct portal_dbus_session {
 	bool active;
-	bool metadata_cursor;
+	enum cursor_modes cursor_mode;
 	char* session_handle;
 	sd_bus_slot* slot;
 	void* state;
@@ -116,7 +116,7 @@ struct ipc_start_capture_output start_capture(struct portal_dbus_session* dbus_s
 	ipc_buffer.id = IPC_START_CAP_IN;
 	strncpy(ipc_buffer.start_capture_input.device, sess->device, 64);
 	ipc_buffer.start_capture_input.display = *sess->display;
-	ipc_buffer.start_capture_input.metadata_cursor = dbus_sess->metadata_cursor;
+	ipc_buffer.start_capture_input.cursor_mode = dbus_sess->cursor_mode;
 	
 	if (write(sess->ipc_fd_write, &ipc_buffer, sizeof(ipc_buffer)) != sizeof(ipc_buffer)) goto err;
 	if (read(sess->ipc_fd_read, &ipc_buffer, sizeof(ipc_buffer)) != sizeof(ipc_buffer) || ipc_buffer.id != IPC_START_CAP_OUT) goto err;
@@ -412,13 +412,6 @@ static int method_screencast_create_session(sd_bus_message *msg, void *data,
 	return 0;
 }
 
-
-enum cursor_modes {
-  HIDDEN = 1,
-  EMBEDDED = 2,
-  METADATA = 4,
-};
-
 enum source_types {
   MONITOR = 1,
   WINDOW = 2,
@@ -430,7 +423,7 @@ enum persist_modes {
 };
 
 
-int cursor_mode = METADATA;
+int cursor_mode = EMBEDDED;
 int source_type = MONITOR;
 int persist_mode = PERSIST_NONE;
 
@@ -478,8 +471,8 @@ static int method_screencast_select_sources(sd_bus_message *msg, void *data,
 		goto error;
 	}
 
-	// default to metadata cursor mode if not specified
-	cursor_mode = METADATA;
+	// default to embedded cursor mode if not specified
+	cursor_mode = EMBEDDED;
 	// default to no persist if not specified
 	persist_mode = PERSIST_NONE;
 
@@ -506,10 +499,6 @@ static int method_screencast_select_sources(sd_bus_message *msg, void *data,
 			logprint(INFO, "dbus: option types: %x", type_mask);
 		} else if (strcmp(key, "cursor_mode") == 0) {
 			sd_bus_message_read(msg, "v", "u", &cursor_mode);
-			if (cursor_mode & EMBEDDED) {
-				logprint(ERROR, "dbus: unsupported cursor mode requested, cancelling");
-				goto error;
-			}
 			logprint(INFO, "dbus: option cursor_mode:%x", cursor_mode);
 		} else if (strcmp(key, "restore_data") == 0) {
 			logprint(INFO, "dbus: restore data available");
@@ -625,14 +614,14 @@ static int method_screencast_select_sources(sd_bus_message *msg, void *data,
 		FILE* chose_pipe;
 		int readlen;
 		
-		chooser_txt = malloc(n_displays * (32+1) + strlen("echo -e \"\" | rofi -dmenu") +1);
+		chooser_txt = malloc(n_displays * (32+1) + strlen("echo -e \"\" | rofi -dmenu -window-title 'Select screen to share'") +1);
 		strcpy(chooser_txt, "echo -e \"");
 		for (int i = 0; i < n_displays; i++) {
 			strcat(chooser_txt, displays[i].name);
 			if (i != n_displays -1)
 				strcat(chooser_txt, "\n");
 		}
-		strcat(chooser_txt, "\" | rofi -dmenu");
+		strcat(chooser_txt, "\" | rofi -dmenu -window-title 'Select screen to share'");
 		
 		chose_pipe = popen(chooser_txt, "r");
 		if (!chose_pipe) {
@@ -681,7 +670,7 @@ static int method_screencast_select_sources(sd_bus_message *msg, void *data,
 	}
 	
 	if (!selection_canceled) {
-		dbus_sess->metadata_cursor = cursor_mode == METADATA;
+		dbus_sess->cursor_mode = cursor_mode;
 		
 		dbus_sess->display = target;
 		dbus_sess->device = strdup(device);
@@ -935,7 +924,7 @@ static int method_screencast_start(sd_bus_message *msg, void *data,
 #define XDP_CAST_PROTO_VER 6
 
 const uint32_t source_types_ = MONITOR;
-const uint32_t cursor_modes_ = HIDDEN | METADATA;
+const uint32_t cursor_modes_ = HIDDEN | EMBEDDED | METADATA;
 const uint32_t screencast_version_ = XDP_CAST_PROTO_VER;
 
 static const sd_bus_vtable screencast_vtable[] = {
@@ -1034,7 +1023,7 @@ int main(int argc, char *argv[]) {
 	n_displays = drmtap_list_displays(displays_ctx, displays, 8);
 	
 	cast.source_types = MONITOR;
-	cast.cursor_modes = HIDDEN | METADATA;
+	cast.cursor_modes = HIDDEN | EMBEDDED | METADATA;
 	cast.screencast_version = XDP_CAST_PROTO_VER;
 	
 	dbus_basic_setup(&cast);
