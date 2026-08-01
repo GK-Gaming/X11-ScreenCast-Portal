@@ -635,8 +635,17 @@ static int method_screencast_select_sources(sd_bus_message *msg, void *data,
 		strcat(chooser_txt, "\" | rofi -dmenu");
 		
 		chose_pipe = popen(chooser_txt, "r");
+		if (!chose_pipe) {
+			printf("failed to popen(); %s\n", strerror(errno));
+			free(chooser_txt);
+			goto err;
+		}
 		readlen = fread(chose_txt, 1, 32+1, chose_pipe);
-		pclose(chose_pipe);
+		if (pclose(chose_pipe)) {
+			printf("failed to run chooser command: %s\nis rofi installed?\n", strerror(errno));
+			free(chooser_txt);
+			goto err;
+		}
 		
 		chose_txt[readlen-1] = '\0';
 		
@@ -651,7 +660,7 @@ static int method_screencast_select_sources(sd_bus_message *msg, void *data,
 	
 	// END OF SELECTION LOGIC
 	
-	if (!target)
+	if (!target) err:
 		selection_canceled = true;
 
 	ret = sd_bus_message_new_method_return(msg, &reply);

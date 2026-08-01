@@ -429,7 +429,6 @@ struct spa_pod* build_format(struct spa_pod_builder *b, enum spa_video_format fo
 		spa_pod_builder_pop(b, &f[1]);
 	}
 	
-	// variable framerate
 	spa_pod_builder_add(b, SPA_FORMAT_VIDEO_framerate,
 		SPA_POD_Fraction(&SPA_FRACTION(framerate, 1)), 0);
 	if (framerate > 0) {
@@ -498,14 +497,14 @@ static struct spa_pod *fixate_format(struct spa_pod_builder *b, enum spa_video_f
 	spa_pod_builder_add(b, SPA_FORMAT_VIDEO_size,
 		SPA_POD_Rectangle(&SPA_RECTANGLE(width, height)),
 		0);
-	// variable framerate
+	
 	spa_pod_builder_add(b, SPA_FORMAT_VIDEO_framerate,
-		SPA_POD_Fraction(&SPA_FRACTION(0, 1)), 0);
+		SPA_POD_Fraction(&SPA_FRACTION(framerate, 1)), 0);
 	if (framerate > 0) {
 		spa_pod_builder_add(b, SPA_FORMAT_VIDEO_maxFramerate,
 			SPA_POD_CHOICE_RANGE_Fraction(
 				&SPA_FRACTION(framerate, 1),
-				&SPA_FRACTION(1, 1),
+				&SPA_FRACTION(0, 1),
 				&SPA_FRACTION(framerate, 1)),
 			0);
 	}
