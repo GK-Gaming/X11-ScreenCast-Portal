@@ -1,0 +1,25 @@
+Code adapted from xdg-desktop-portal-wlr
+And also very messy
+
+You have to download libdrmtap from https://github.com/fxd0h/libdrmtap and modify make.sh (sorry dont have proper makefile yet)
+give the xdg-desktop-portal-x11-session program admin caps (so it can grab the output of the GPU through drmtap)
+using:
+# setcap cap_sys_admin+ep xdg-desktop-portal-x11-session
+
+To make sure programs can talk to the portal using dbus it will have to be registered in the xdg-desktop portal
+
+Files setup for portal (might differ on distro idk, this is for arch):
+put x11-portals.conf in /usr/share/xdg-desktop-portal/
+put x11.portal in /usr/share/xdg-desktop-portal/portals/
+put org.freedesktop.impl.portal.desktop.x11.service in /usr/share/dbus-1/services/
+put xdg-desktop-portal-x11.service in /usr/lib/systemd/user/
+put xdg-desktop-portal-x11 & xdg-desktop-portal-x11-session in /lib/
+
+after that (hopefully to portal files i made work outside i3)
+systemctl --user restart xdg-desktop-portal
+then run the portal manually (doesnt yet work if started by xdg-desktop-portal)
+./xdg-desktop-portal-x11
+and then you get log
+
+open OBS or wayvr and it should work
+

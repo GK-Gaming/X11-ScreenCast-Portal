@@ -1,0 +1,11 @@
+[Unit]
+Description=Portal service (X11 implementation)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.impl.portal.desktop.x11
+ExecStart=/usr/lib/xdg-desktop-portal-x11
+Restart=on-failure
+
