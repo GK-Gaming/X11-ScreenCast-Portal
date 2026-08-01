@@ -609,37 +609,45 @@ static int method_screencast_select_sources(sd_bus_message *msg, void *data,
 	
 	// ---------------- SELECTION HAPPENS HERE!!
 	n_displays = drmtap_list_displays(displays_ctx, displays, 8);
-	char* chooser_txt;
-	char chose_txt[32];
 	drmtap_display* target = NULL;
 	char* device = "";
-	FILE* chose_pipe;
-	int readlen;
 	
-	chooser_txt = malloc(n_displays * (32+1) + strlen("echo -e \"\" | rofi -dmenu") +1);
-	strcpy(chooser_txt, "echo -e \"");
-	for (int i = 0; i < n_displays; i++) {
-		strcat(chooser_txt, displays[i].name);
-		if (i != n_displays -1)
-			strcat(chooser_txt, "\n");
-	}
-	strcat(chooser_txt, "\" | rofi -dmenu");
+	if (restore_data.version)
+		for (int i = 0; i < n_displays; i++)
+			if (!strcmp(restore_data.output_name, displays[i].name)) {
+				target = displays + i;
+				break;
+			}
 	
-	chose_pipe = popen(chooser_txt, "r");
-	readlen = fread(chose_txt, 1, 32+1, chose_pipe);
-	pclose(chose_pipe);
-	
-	chose_txt[readlen-1] = '\0';
-	printf("CHOSE: %s\n", chose_txt);
-	
-	for (int i = 0; i < n_displays; i++) {
-		if (!strcmp(chose_txt, displays[i].name)) {
-			target = displays + i;
-			break;
+	if (!target) {
+		char* chooser_txt = NULL;
+		char chose_txt[32];
+		FILE* chose_pipe;
+		int readlen;
+		
+		chooser_txt = malloc(n_displays * (32+1) + strlen("echo -e \"\" | rofi -dmenu") +1);
+		strcpy(chooser_txt, "echo -e \"");
+		for (int i = 0; i < n_displays; i++) {
+			strcat(chooser_txt, displays[i].name);
+			if (i != n_displays -1)
+				strcat(chooser_txt, "\n");
 		}
+		strcat(chooser_txt, "\" | rofi -dmenu");
+		
+		chose_pipe = popen(chooser_txt, "r");
+		readlen = fread(chose_txt, 1, 32+1, chose_pipe);
+		pclose(chose_pipe);
+		
+		chose_txt[readlen-1] = '\0';
+		
+		for (int i = 0; i < n_displays; i++)
+			if (!strcmp(chose_txt, displays[i].name)) {
+				target = displays + i;
+				break;
+			}
+		
+		free(chooser_txt);
 	}
-	
-	free(chooser_txt);
 	
 	// END OF SELECTION LOGIC
 	
