@@ -83,7 +83,8 @@ void stop_capture(struct portal_instance* data);
 #define CURSOR_WIDTH	64
 #define CURSOR_HEIGHT	64
 #define CURSOR_BPP	4
-#define CURSOR_META_SIZE(w, h) (sizeof(struct spa_meta_cursor) + sizeof(struct spa_meta_bitmap) + w * h * CURSOR_BPP)
+#define CURSOR_META_SIZE(w,h)	(sizeof(struct spa_meta_cursor) + \
+				 sizeof(struct spa_meta_bitmap) + w * h * CURSOR_BPP)
 
 #define MAX_BUFFERS	64
 
@@ -250,26 +251,28 @@ static void on_process(void *userdata)
 	}
 	
 	if ((mcs = spa_buffer_find_meta_data(buf, SPA_META_Cursor, sizeof(struct spa_meta_cursor)))) {
-		mcs->id = 1;
-		mcs->position.x = cursor.x;
-		mcs->position.y = cursor.y;
-		mcs->hotspot.x = cursor.hot_x;
-		mcs->hotspot.y = cursor.hot_y;
-		mcs->bitmap_offset = 0;
-		
-		struct spa_meta_bitmap *bcs = SPA_MEMBER(
-			mcs,
-			mcs->bitmap_offset,
-			struct spa_meta_bitmap);
-		
-		bcs->format = SPA_VIDEO_FORMAT_RGBA;
-		bcs->offset = sizeof(struct spa_meta_bitmap);
-		bcs->size.width = cursor.width;
-		bcs->size.height = cursor.height;
-		bcs->stride = bcs->size.width * 4;
-		
-		uint8_t *bitmap_data = SPA_MEMBER(bcs, bcs->offset, uint8_t);
-		memcpy(bitmap_data, cursor.pixels, bcs->stride * bcs->size.height);
+		if (cursor.pixels) {
+			struct spa_meta_bitmap *mb;
+			
+			mcs->id = 1;
+			mcs->position.x = cursor.x;
+			mcs->position.y = cursor.y;
+			mcs->hotspot.x = cursor.hot_x;
+			mcs->hotspot.y = cursor.hot_y;
+			mcs->bitmap_offset = 0;
+			
+			mb = SPA_PTROFF(mcs, mcs->bitmap_offset, struct spa_meta_bitmap);
+			
+			mb->format = SPA_VIDEO_FORMAT_ARGB;
+			mb->offset = sizeof(struct spa_meta_bitmap);
+			mb->size.width = cursor.width;
+			mb->size.height = cursor.height;
+			mb->stride = mb->size.width * 4;
+			
+			uint8_t *bitmap_data = SPA_MEMBER(mb, mb->offset, uint8_t);
+			memcpy(bitmap_data, cursor.pixels, mb->stride * mb->size.height);
+		} else
+			mcs->id = 0;
 	}
 
 
@@ -577,7 +580,8 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 	params[n_params++] = spa_pod_builder_add_object(&b,
 		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
 		SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Cursor),
-		SPA_PARAM_META_size, SPA_POD_Int(CURSOR_META_SIZE(cursor.width, cursor.height)));
+		SPA_PARAM_META_size, SPA_POD_Int(
+			CURSOR_META_SIZE(cursor.width,cursor.height)));
 
 	params[n_params++] = spa_pod_builder_add_object(&b,
 		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,

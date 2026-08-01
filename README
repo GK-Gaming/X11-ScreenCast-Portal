@@ -20,8 +20,8 @@ put xdg-desktop-portal-x11 & xdg-desktop-portal-x11-session in /lib/
 
 after that (hopefully to portal files i made work outside i3)
 systemctl --user restart xdg-desktop-portal
-then run the portal manually (doesnt yet work if started by xdg-desktop-portal)
-./xdg-desktop-portal-x11
+then run the portal manually
+$ ./xdg-desktop-portal-x11
 and then you get log
 
 open OBS or wayvr and it should work

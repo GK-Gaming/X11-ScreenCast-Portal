@@ -605,6 +605,46 @@ static int method_screencast_select_sources(sd_bus_message *msg, void *data,
 	}
 
 	bool selection_canceled = false; //!setup_target(ctx, sess, restore_data.version > 0 ? &restore_data : NULL, type_mask);
+	
+	
+	// ---------------- SELECTION HAPPENS HERE!!
+	n_displays = drmtap_list_displays(displays_ctx, displays, 8);
+	char* chooser_txt;
+	char chose_txt[32];
+	drmtap_display* target = NULL;
+	char* device = "";
+	FILE* chose_pipe;
+	int readlen;
+	
+	chooser_txt = malloc(n_displays * (32+1) + strlen("echo -e \"\" | rofi -dmenu") +1);
+	strcpy(chooser_txt, "echo -e \"");
+	for (int i = 0; i < n_displays; i++) {
+		strcat(chooser_txt, displays[i].name);
+		if (i != n_displays -1)
+			strcat(chooser_txt, "\n");
+	}
+	strcat(chooser_txt, "\" | rofi -dmenu");
+	
+	chose_pipe = popen(chooser_txt, "r");
+	readlen = fread(chose_txt, 1, 32+1, chose_pipe);
+	pclose(chose_pipe);
+	
+	chose_txt[readlen-1] = '\0';
+	printf("CHOSE: %s\n", chose_txt);
+	
+	for (int i = 0; i < n_displays; i++) {
+		if (!strcmp(chose_txt, displays[i].name)) {
+			target = displays + i;
+			break;
+		}
+	}
+	
+	free(chooser_txt);
+	
+	// END OF SELECTION LOGIC
+	
+	if (!target)
+		selection_canceled = true;
 
 	ret = sd_bus_message_new_method_return(msg, &reply);
 	if (ret < 0) {
@@ -623,14 +663,12 @@ static int method_screencast_select_sources(sd_bus_message *msg, void *data,
 		return ret;
 	}
 	
-	// ---------------- SELECTION HAPPENS HERE!!
-	drmtap_display* target = &displays[0];
-	char* device = "";
-	
-	dbus_sess->metadata_cursor = cursor_mode == METADATA;
-	
-	dbus_sess->display = target;
-	dbus_sess->device = strdup(device);
+	if (!selection_canceled) {
+		dbus_sess->metadata_cursor = cursor_mode == METADATA;
+		
+		dbus_sess->display = target;
+		dbus_sess->device = strdup(device);
+	}
 	
 	sd_bus_message_unref(reply);
 	return 0;
