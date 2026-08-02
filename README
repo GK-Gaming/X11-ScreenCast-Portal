@@ -1,6 +1,15 @@
 Code adapted from xdg-desktop-portal-wlr (MIT ©emersion)
 And also very messy
 
+MAKEFILE:
+
+using just "make" will build the files
+"make session-caps" will give the session program CAP_SYS_ADMIN
+"make run" will do "make session-caps" and run the portal
+"make install" will do "make" and "make session-caps" and install the portal files to your system and restart xdg-desktop-portal
+
+MANUAL:
+
 You have to download libdrmtap from https://github.com/fxd0h/libdrmtap
 and make sure rofi is installed for the screen picker UI
 then modify make.sh (dont have proper makefile yet)

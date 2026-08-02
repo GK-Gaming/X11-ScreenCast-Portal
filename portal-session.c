@@ -10,7 +10,7 @@
  
 #define _GNU_SOURCE
 
-#include "both.h"
+#include "portal.h"
 
 #include <stdio.h>
 #include <errno.h>
@@ -428,6 +428,8 @@ void update_timer(void) {
 }
 
 
+// Using this header can cause the program to break on
+// internal ABI changes in drmtap
 #include "drmtapfix.h" // drmtap_helper_stop(ctx);
 
 static void on_timeout(void *userdata, uint64_t expirations)
