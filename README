@@ -8,13 +8,10 @@ using just "make" will build the files
 "make run" will do "make session-caps" and run the portal
 "make install" will do "make" and "make session-caps" and install the portal files to your system and restart xdg-desktop-portal
 
-MANUAL:
+MANUAL INSTALL:
 
 You have to download libdrmtap from https://github.com/fxd0h/libdrmtap
 and make sure rofi is installed for the screen picker UI
-then modify make.sh (dont have proper makefile yet)
-in make.sh:
-replace the include paths for the libdrmtap library, those point to MY dev directory rn
 
 give the xdg-desktop-portal-x11-session program admin caps (so it can grab the output of the GPU through drmtap)
 using:
