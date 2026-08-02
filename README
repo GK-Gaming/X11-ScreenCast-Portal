@@ -1,6 +1,10 @@
 Code adapted from xdg-desktop-portal-wlr (MIT ©emersion)
 And also very messy
 
+After building libdrmtap and putting the .so files
+in your system directory (/lib or /usr/local/lib) or in here
+(system directory is preferred for making autorun by xdg-desktop-portal work):
+
 MAKEFILE:
 
 using just "make" will build the files
