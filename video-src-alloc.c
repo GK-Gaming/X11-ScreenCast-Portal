@@ -957,8 +957,6 @@ int start_capture_ipc_event(struct ipc_start_capture_input start_capture_input) 
 	if (first) {
 		display = start_capture_input.display;
 		
-		printf("open: %s\n", start_capture_input.device);
-		
 		drmtap_config cfg = {0};
 		cfg.debug = 0;
 		cfg.device_path = start_capture_input.device;

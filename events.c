@@ -622,6 +622,7 @@ static int method_screencast_select_sources(sd_bus_message *msg, void *data,
 			displays_ctx = drmtap_open(&cfg);
 			if (!displays_ctx) continue;
 			n_displays += drmtap_list_displays(displays_ctx, displays+n_displays, 32-n_displays);
+			drmtap_close(displays_ctx);
 			for (int d = o_n_displays; d < n_displays; d++)
 				strcpy(displays_device[d], cfg.device_path);
 		}
