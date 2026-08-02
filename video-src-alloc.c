@@ -78,17 +78,6 @@ struct portal_ipc ipc_buffer;
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
-static void APIENTRY DebugCallback(
-	GLenum source, GLenum type, GLuint id, GLenum severity,
-	GLsizei length, const GLchar* message, const void* user)
-{
-	fprintf(stderr, "%s\n", message);
-	if (severity == GL_DEBUG_SEVERITY_HIGH || severity == GL_DEBUG_SEVERITY_MEDIUM)
-	{
-		printf("OpenGL API usage error! Use debugger to examine call stack!\n");
-	}
-}
-
 #ifdef DMABUF_EXPLICIT_LOAD
 PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC eglExportDMABUFImageQueryMESA;
 PFNEGLEXPORTDMABUFIMAGEMESAPROC eglExportDMABUFImageMESA;
@@ -444,18 +433,16 @@ static void on_timeout(void *userdata, uint64_t expirations)
 	
 	pw_log_trace("timeout");
 	
+	drmtap_cursor_release(ctx, &cursor);
+	drmtap_get_cursor(ctx, &cursor);
+	
 	for (int i = 0; i < N_RTS; i++)
 		if (rts[i]->state == PW_STREAM_STATE_STREAMING) {
 			pw_stream_trigger_process(rts[i]->stream);
 			any_streaming = true;
 		}
 	
-	for (int i = 0; i < MAX_SESSIONS; i++)
-	
 	if (!any_streaming) return;
-	
-	drmtap_cursor_release(ctx, &cursor);
-	drmtap_get_cursor(ctx, &cursor);
 	
 	// skip basic_rt
 	for (int i = 1; i < N_RTS; i++)
@@ -815,19 +802,19 @@ int start_capture(struct ipc_start_capture_input input, int id)
 		
 
 		pw_stream_add_listener(rt->stream,
-					   &rt->stream_listener,
-					   &stream_events,
-					   rt);
+					&rt->stream_listener,
+					&stream_events,
+					rt);
 
 		rt->node_id = SPA_ID_INVALID;
 	}
 
 	pw_stream_connect(rt->stream,
-			  PW_DIRECTION_OUTPUT,
-			  PW_ID_ANY,
-			  PW_STREAM_FLAG_DRIVER |
-			  PW_STREAM_FLAG_ALLOC_BUFFERS,
-			  (const struct spa_pod**)params, n_params);
+			PW_DIRECTION_OUTPUT,
+			PW_ID_ANY,
+			PW_STREAM_FLAG_DRIVER |
+			PW_STREAM_FLAG_ALLOC_BUFFERS,
+			(const struct spa_pod**)params, n_params);
 	
 	data->active = true;
 	data->id = id;
@@ -997,10 +984,6 @@ int start_capture_ipc_event(struct ipc_start_capture_input start_capture_input) 
 		egl_context = eglCreateContext(egl_display, NULL, EGL_NO_CONTEXT, context_attribs);
 		if (!egl_context) goto err;
 		if (!eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context)) goto err;
-		
-		// enable debug callback
-		glDebugMessageCallback(&DebugCallback, NULL);
-		glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
 		
 #ifdef DMABUF_EXPLICIT_LOAD
 		eglExportDMABUFImageQueryMESA = (PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC)eglGetProcAddress("eglExportDMABUFImageQueryMESA");

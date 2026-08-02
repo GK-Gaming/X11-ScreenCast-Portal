@@ -146,19 +146,22 @@ void stop_capture(struct portal_session* sess, uint32_t node_id) {
 			if (read(sess->ipc_fd_read, &ipc_buffer, sizeof(ipc_buffer)) != sizeof(ipc_buffer)) goto ipc_err;
 		}
 		
-		if (!--sess->connections) {
+		if (!(sess->connections -1)) {
 			waitpid(sess->pid, NULL, 0);
 			
 			close(sess->ipc_fd_write);
 			close(sess->ipc_fd_read);
-			((struct portal_state*) (sess->state))->sessions--;
-			if (sess->device) {
-				free(sess->device);
-				sess->device = NULL;
-			}
-			
-			pollfds[sess->sess_id + POLLS].fd = -1;
 		}
+	}
+	
+	if (!--sess->connections) {
+		((struct portal_state*) (sess->state))->sessions--;
+		if (sess->device) {
+			free(sess->device);
+			sess->device = NULL;
+		}
+		
+		pollfds[sess->sess_id + POLLS].fd = -1;
 	}
 	
 	return;
@@ -381,6 +384,10 @@ static int method_screencast_create_session(sd_bus_message *msg, void *data,
 	for (sess_id = 0; sess_id  < MAX_SESSIONS; sess_id ++)
 		if (!state->dbus_session[sess_id].session_handle)
 			break;
+	if (sess_id == MAX_SESSIONS) {
+		printf("MAX SESSIONS REACHED (%i)\n", MAX_SESSIONS);
+		return -1;
+	}
 	
 	struct portal_dbus_session* sess = state->dbus_session + sess_id;
 	sess->active = true;
@@ -765,6 +772,7 @@ static int method_screencast_start(sd_bus_message *msg, void *data,
 	}
 	
 	// Associate dbus_session with portal_session
+	bool new_session = false;
 	{
 		int p_sess_id;
 		for (p_sess_id = 0; p_sess_id < MAX_SESSIONS; p_sess_id++) {
@@ -779,6 +787,12 @@ static int method_screencast_start(sd_bus_message *msg, void *data,
 			for (p_sess_id = 0; p_sess_id < MAX_SESSIONS; p_sess_id++)
 				if (!state->session[p_sess_id].connections)
 					break;
+			if (p_sess_id == MAX_SESSIONS) {
+				printf("MAX SESSIONS REACHED (%i)\n", MAX_SESSIONS);
+				return -1;
+			}
+			
+			new_session = true;
 			state->sessions++;
 			sess = &state->session[p_sess_id];
 			// First start
@@ -799,103 +813,104 @@ static int method_screencast_start(sd_bus_message *msg, void *data,
 
 	struct ipc_start_capture_output output = start_capture(dbus_sess, sess);
 	if (output.ret < 0) {
-		return output.ret;
+		ret = output.ret;
+		goto err;
 	}
 	dbus_sess->node_id = output.node_id;
 
 	sd_bus_message *reply = NULL;
 	ret = sd_bus_message_new_method_return(msg, &reply);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 
 	logprint(DEBUG, "dbus: start: returning node %d", (int)output.node_id);
 	ret = sd_bus_message_append(reply, "u", PORTAL_RESPONSE_SUCCESS);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_open_container(reply, 'a', "{sv}");
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_open_container(reply, 'e', "sv");
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_append(reply, "s", "streams");
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_open_container(reply, 'v', "a(ua{sv})");
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_open_container(reply, 'a', "(ua{sv})");
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_open_container(reply, 'r', "ua{sv}");
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_append(reply, "u", output.node_id);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_open_container(reply, 'a', "{sv}");
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_append(reply, "{sv}",
 		"position", "(ii)", 0, 0);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_append(reply, "{sv}",
 		"size", "(ii)", sess->display->width, sess->display->height);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_append(reply, "{sv}", "source_type", "u", MONITOR);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_append(reply, "{sv}",
 		"mapping_id", "s", sess->display->name);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	if (output.pipewire_serial != 0) {
 		ret = sd_bus_message_append(reply, "{sv}",
 			"pipewire-serial", "t", output.pipewire_serial);
 		if (ret < 0) {
-			return ret;
+			goto err;
 		}
 	}
 	ret = sd_bus_message_close_container(reply);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_close_container(reply);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_close_container(reply);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_close_container(reply);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_close_container(reply);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	ret = sd_bus_message_append(reply, "{sv}",
 		"persist_mode", "u", persist_mode);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	if (persist_mode != PERSIST_NONE) {
 		struct xdpw_screencast_restore_data restore_data;
@@ -905,22 +920,26 @@ static int method_screencast_start(sd_bus_message *msg, void *data,
 			"wlroots", XDP_CAST_DATA_VER,
 			"a{sv}", 1, "output_name", "s", restore_data.output_name);
 		if (ret < 0) {
-			return ret;
+			goto err;
 		}
 	}
 
 	ret = sd_bus_message_close_container(reply);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 
 	ret = sd_bus_send(NULL, reply, NULL);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 	sd_bus_message_unref(reply);
 
 	return 0;
+	
+	err:;
+	
+	return ret;
 }
 
 #define XDP_CAST_PROTO_VER 6
