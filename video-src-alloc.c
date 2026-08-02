@@ -989,8 +989,8 @@ int start_capture_ipc_event(struct ipc_start_capture_input start_capture_input) 
 		if (!eglInitialize(egl_display, NULL, NULL)) goto err;
 		// Create EGL context
 		EGLint context_attribs[] = {
-			EGL_CONTEXT_MAJOR_VERSION, 1,
-			EGL_CONTEXT_MINOR_VERSION, 1,
+			EGL_CONTEXT_MAJOR_VERSION, 3,
+			EGL_CONTEXT_MINOR_VERSION, 0,
 			EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
 			EGL_NONE
 		};
