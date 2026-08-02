@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "both.h"
 
+char portal_exec_dir[PATH_MAX];
 
 drmtap_display displays[32];
 char displays_device[32][64];
@@ -1063,6 +1064,12 @@ void dbus_basic_setup(struct portal_state *cast) {
 
 int main(int argc, char *argv[]) {
 	struct portal_state cast = {0};
+	
+	// Setup path for later starting the session
+	readlink("/proc/self/exe", portal_exec_dir, PATH_MAX);
+	char* trim = strrchr(portal_exec_dir, '/');
+	if (trim) *trim = '\0';
+	chdir(portal_exec_dir);
 	
 	cast.source_types = MONITOR;
 	cast.cursor_modes = HIDDEN | EMBEDDED | METADATA;
