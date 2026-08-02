@@ -51,23 +51,16 @@ drmtap_dmabuf_desc desc;
 drmtap_cursor_info cursor;
 
 int framerate;
-unsigned spa_format;
 
 struct portal_instance {
 	bool active;
-	enum pw_stream_state state;
+	
+	int rt_id;
+	struct rt* rt;
 	
 	int id;
 	
-	uint32_t node_id;
-	uint64_t pipewire_serial;
-
-	struct pw_stream *stream;
-	struct spa_hook stream_listener;
-
-	struct spa_video_info_raw format;
-	int32_t stride;
-	uint32_t seq;
+	enum cursor_modes cursor_mode;
 };
 
 int instances;
@@ -77,7 +70,75 @@ int portal_fd_write;
 int portal_fd_read;
 struct portal_ipc ipc_buffer;
 
-void stop_capture(struct portal_instance* data);
+// Embedded cursor
+#define DMABUF_EXPLICIT_LOAD
+
+#define GL_GLEXT_PROTOTYPES
+#include <GL/gl.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+
+static void APIENTRY DebugCallback(
+	GLenum source, GLenum type, GLuint id, GLenum severity,
+	GLsizei length, const GLchar* message, const void* user)
+{
+	fprintf(stderr, "%s\n", message);
+	if (severity == GL_DEBUG_SEVERITY_HIGH || severity == GL_DEBUG_SEVERITY_MEDIUM)
+	{
+		printf("OpenGL API usage error! Use debugger to examine call stack!\n");
+	}
+}
+
+#ifdef DMABUF_EXPLICIT_LOAD
+PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC eglExportDMABUFImageQueryMESA;
+PFNEGLEXPORTDMABUFIMAGEMESAPROC eglExportDMABUFImageMESA;
+#endif
+
+EGLDisplay egl_display;
+EGLContext egl_context;
+EGLSurface egl_surface;
+
+typedef bool (*rt_drawfunc)(struct rt* rt);
+
+struct rt {
+	int uses;
+	
+	uint32_t node_id;
+	uint64_t pipewire_serial;
+	enum pw_stream_state state;
+	
+	struct pw_stream *stream;
+	struct spa_hook stream_listener;
+	
+	struct spa_video_info_raw format;
+	uint32_t seq;
+	
+	GLuint gl_texture;
+	GLuint gl_framebuffer;
+	GLuint gl_renderbuffer;
+	EGLImage egl_image;
+	int dmabuf_fd[4];
+	
+	int planes;
+	int fourcc;
+	unsigned spa_format;
+	EGLuint64KHR modifier;
+	EGLint stride[4];
+	EGLint offset[4];
+	
+	rt_drawfunc drawfunc;
+};
+
+#define N_RTS 2
+
+struct rt basic_rt; // Just screen (no cursor)
+struct rt embed_cursor_rt; // Screen with cursor
+struct rt* rts[N_RTS] = {&basic_rt, &embed_cursor_rt};
+
+GLuint cursor_texture;
+
+void stop_instance(struct portal_instance* data, bool send_back);
+void stop_rt(struct rt* rt, bool from_instance);
 
 #define BPP		4
 #define CURSOR_WIDTH	64
@@ -202,27 +263,114 @@ enum spa_video_format xdpw_format_pw_strip_alpha(enum spa_video_format format) {
 	}
 }
 
-static void draw_elipse(uint32_t *dst, int width, int height, uint32_t color)
-{
-	int i, j, r1, r2, r12, r22, r122;
+bool rt_draw_embed_cursor(struct rt* rt) {
+	glViewport(0, 0 , desc.width, desc.height);
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+	
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_BLEND);
+	glEnable(GL_CULL_FACE);
+	glEnable(GL_TEXTURE_2D);
+	
+	// Screen
+	glBindTexture(GL_TEXTURE_2D, basic_rt.gl_texture);
+	glBegin(GL_QUADS);
+		glTexCoord2f(0, 0);
+		glVertex2f(-1, -1);
+		glTexCoord2f(1, 0);
+		glVertex2f(1, -1);
+		glTexCoord2f(1, 1);
+		glVertex2f(1, 1);
+		glTexCoord2f(0, 1);
+		glVertex2f(-1, 1);
+	glEnd();
+	
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	
+	if (cursor.visible) {
+		// Cursor
+		glTranslatef((cursor.x+cursor.width/2.f)/(float)display.width*2-1, (cursor.y+cursor.height/2.f)/(float)display.height*2-1, 0.);
+		glScalef(cursor.width/(float)display.width, cursor.height/(float)display.height, 1.);
+		glBindTexture(GL_TEXTURE_2D, cursor_texture);
+		// Update cursor image
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, cursor.width, cursor.height, 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, cursor.pixels);
+		glBegin(GL_QUADS);
+			glTexCoord2f(0, 0);
+			glVertex2f(-1, -1);
+			glTexCoord2f(1, 0);
+			glVertex2f(1, -1);
+			glTexCoord2f(1, 1);
+			glVertex2f(1, 1);
+			glTexCoord2f(0, 1);
+			glVertex2f(-1, 1);
+		glEnd();
+	}
+	
+	glFlush();
+	
+	return true;
+}
 
-	r1 = width/2;
-	r12 = r1 * r1;
-	r2 = height/2;
-	r22 = r2 * r2;
-	r122 = r12 * r22;
-
-	for (i = -r2; i < r2; i++) {
-		for (j = -r1; j < r1; j++) {
-			dst[(i + r2)*width+(j+r1)] =
-				(i * i * r12 + j * j * r22 <= r122) ? color : 0x00000000;
+void delete_rt_dmabuf_texture(struct rt* rt) {
+	for (int i = 0; i < rt->planes; i++) {
+		if (rt->dmabuf_fd[i]) {
+			close(rt->dmabuf_fd[i]);
+			rt->dmabuf_fd[i] = -1;
 		}
 	}
+	if (rt->egl_image) {
+		eglDestroyImage(egl_display, rt->egl_image);
+		rt->egl_image = NULL;
+	}
+	if (rt->gl_texture) {
+		glDeleteTextures(1, &rt->gl_texture);
+		rt->gl_texture = 0;
+	}
+	if (rt->gl_renderbuffer) {
+		glDeleteRenderbuffers(1, &rt->gl_renderbuffer);
+		rt->gl_renderbuffer = 0;
+	}
+	if (rt->gl_framebuffer) {
+		glDeleteFramebuffers(1, &rt->gl_framebuffer);
+		rt->gl_framebuffer = 0;
+	}
+}
+
+bool create_rt_dmabuf_texture(struct rt* rt) {
+	glGenFramebuffers(1, &rt->gl_framebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, rt->gl_framebuffer);
+	
+	glGenTextures(1, &rt->gl_texture);
+	glBindTexture(GL_TEXTURE_2D, rt->gl_texture);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, desc.width, desc.height, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt->gl_texture, 0);
+	
+	rt->egl_image = eglCreateImage(egl_display, egl_context, EGL_GL_TEXTURE_2D, (EGLClientBuffer)(uint64_t)rt->gl_texture, NULL);
+	
+	EGLuint64KHR modifiers[4];
+	EGLBoolean queried = eglExportDMABUFImageQueryMESA(egl_display, rt->egl_image, &rt->fourcc, &rt->planes, modifiers);
+	rt->modifier = modifiers[0]; // All elements have the same value
+	EGLBoolean exported = eglExportDMABUFImageMESA(egl_display, rt->egl_image, rt->dmabuf_fd, rt->stride, rt->offset);
+	if (!exported) return false;
+	
+	rt->spa_format = xdpw_format_pw_from_drm_fourcc(rt->fourcc);
+	
+	return true;
+	
+	err:;
+	delete_rt_dmabuf_texture(rt);
+	
+	return false;
 }
 
 static void on_process(void *userdata)
 {
-	struct portal_instance *data = userdata;
+	struct rt *rt = userdata;
 	struct pw_buffer *b;
 	struct spa_buffer *buf;
 	uint32_t i, j;
@@ -232,7 +380,7 @@ static void on_process(void *userdata)
 	struct spa_meta_region *mc;
 	struct spa_meta_cursor *mcs;
 
-	if ((b = pw_stream_dequeue_buffer(data->stream)) == NULL) {
+	if ((b = pw_stream_dequeue_buffer(rt->stream)) == NULL) {
 		pw_log_warn("out of buffers: %m");
 		return;
 	}
@@ -241,12 +389,12 @@ static void on_process(void *userdata)
 
 	if ((h = spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof(*h)))) {
 #if 1
-		h->pts = pw_stream_get_nsec(data->stream);
+		h->pts = pw_stream_get_nsec(rt->stream);
 #else
 		h->pts = -1;
 #endif
 		h->flags = 0;
-		h->seq = data->seq++;
+		h->seq = rt->seq++;
 		h->dts_offset = 0;
 	}
 	
@@ -259,11 +407,11 @@ static void on_process(void *userdata)
 			mcs->position.y = cursor.y;
 			mcs->hotspot.x = cursor.hot_x;
 			mcs->hotspot.y = cursor.hot_y;
-			mcs->bitmap_offset = 0;
+			mcs->bitmap_offset = sizeof(struct spa_meta_cursor);
 			
 			mb = SPA_PTROFF(mcs, mcs->bitmap_offset, struct spa_meta_bitmap);
 			
-			mb->format = SPA_VIDEO_FORMAT_ARGB;
+			mb->format = SPA_VIDEO_FORMAT_BGRA;
 			mb->offset = sizeof(struct spa_meta_bitmap);
 			mb->size.width = cursor.width;
 			mb->size.height = cursor.height;
@@ -274,15 +422,8 @@ static void on_process(void *userdata)
 		} else
 			mcs->id = 0;
 	}
-
-
-	buf->datas[0].chunk->offset = 0;
-	buf->datas[0].chunk->size = data->format.size.height * data->stride;
-	buf->datas[0].chunk->stride = data->stride;
 	
-	buf->datas[0].fd = frame.dma_buf_fd;
-	
-	pw_stream_queue_buffer(data->stream, b);
+	pw_stream_queue_buffer(rt->stream, b);
 }
 
 void update_timer(void) {
@@ -291,7 +432,7 @@ void update_timer(void) {
 	timeout.tv_sec = 0;
 	timeout.tv_nsec = 1;
 	interval.tv_sec = 0;
-	interval.tv_nsec = 10000000000/framerate;
+	interval.tv_nsec = 1000000000/framerate;
 	
 	pw_loop_update_timer((pw_loop),
 			timer, &timeout, &interval, false);
@@ -303,15 +444,26 @@ static void on_timeout(void *userdata, uint64_t expirations)
 	
 	pw_log_trace("timeout");
 	
-	for (int i = 0; i < MAX_SESSIONS; i++)
-		if (instance[i].active && instance[i].state == PW_STREAM_STATE_STREAMING) {
-			pw_stream_trigger_process(instance[i].stream);
+	for (int i = 0; i < N_RTS; i++)
+		if (rts[i]->state == PW_STREAM_STATE_STREAMING) {
+			pw_stream_trigger_process(rts[i]->stream);
 			any_streaming = true;
 		}
 	
-	//drmtap_grab(ctx, &frame);
+	for (int i = 0; i < MAX_SESSIONS; i++)
+	
+	if (!any_streaming) return;
+	
 	drmtap_cursor_release(ctx, &cursor);
 	drmtap_get_cursor(ctx, &cursor);
+	
+	// skip basic_rt
+	for (int i = 1; i < N_RTS; i++)
+		if (rts[i]->state == PW_STREAM_STATE_STREAMING) {
+			glActiveTexture(GL_TEXTURE0);
+			glBindFramebuffer(GL_FRAMEBUFFER, rts[i]->gl_framebuffer);
+			rts[i]->drawfunc(rts[i]);
+		}
 }
 
 static uint64_t read_object_serial(struct pw_stream *stream) {
@@ -337,21 +489,21 @@ static uint64_t read_object_serial(struct pw_stream *stream) {
 static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum pw_stream_state state,
 				    const char *error)
 {
-	struct portal_instance *data = _data;
-	data->pipewire_serial = read_object_serial(data->stream);
-	data->state = state;
+	struct rt *rt = _data;
+	rt->pipewire_serial = read_object_serial(rt->stream);
+	rt->state = state;
 
 	printf("stream state: \"%s\" %s\n", pw_stream_state_as_string(state), error ? error : "");
 
 	switch (state) {
 	case PW_STREAM_STATE_ERROR:
-	//case PW_STREAM_STATE_UNCONNECTED:
-		stop_capture(data);
+	case PW_STREAM_STATE_UNCONNECTED:
+		stop_rt(rt, false);
 		break;
 
 	case PW_STREAM_STATE_PAUSED:
-		data->node_id = pw_stream_get_node_id(data->stream);
-		printf("node id: %d\n", data->node_id);
+		rt->node_id = pw_stream_get_node_id(rt->stream);
+		printf("node id: %d\n", rt->node_id);
 		break;
 	case PW_STREAM_STATE_STREAMING:
 	{
@@ -366,7 +518,7 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
  * to provide buffer memory.  */
 static void on_stream_add_buffer(void *_data, struct pw_buffer *buffer)
 {
-	struct portal_instance *data = _data;
+	struct rt *rt = _data;
 	struct spa_buffer *buf = buffer->buffer;
 	struct spa_data *d;
 	unsigned int seals;
@@ -377,13 +529,13 @@ static void on_stream_add_buffer(void *_data, struct pw_buffer *buffer)
 	
 	for (uint32_t plane = 0; plane < buffer->buffer->n_datas; plane++) {
 		d[plane].type = SPA_DATA_DmaBuf;
-		d[plane].maxsize = desc.pitches[plane] * desc.height;
+		d[plane].maxsize = rt->stride[plane] * desc.height;
 		d[plane].mapoffset = 0;
 		d[plane].chunk->size = d[plane].maxsize;
-		d[plane].chunk->stride = desc.pitches[plane] ;
-		d[plane].chunk->offset = desc.offsets[plane];
+		d[plane].chunk->stride = rt->stride[plane];
+		d[plane].chunk->offset = rt->offset[plane];
 		d[plane].flags = SPA_DATA_FLAG_READABLE;
-		d[plane].fd = desc.dma_buf_fd;
+		d[plane].fd = rt->dmabuf_fd[plane];
 		d[plane].data = NULL;
 		if (d[plane].chunk->size == 0)
 			d[plane].chunk->size = 9; // This was choosen by a fair d20.
@@ -443,12 +595,11 @@ struct spa_pod* build_format(struct spa_pod_builder *b, enum spa_video_format fo
 	return spa_pod_builder_pop(b, &f[0]);
 }
 
-void build_formats(struct spa_pod_builder *b, struct portal_instance* data, struct spa_pod * params[5], int* n_params) {
-	
+void build_formats(struct spa_pod_builder *b, struct rt* rt, struct spa_pod * params[5], int* n_params) {
 	{
 		// DMA
-		uint64_t mods[1] = {desc.modifier};
-		params[(*n_params)++] = build_format(b, xdpw_format_pw_from_drm_fourcc(desc.format), desc.width, desc.height, display.refresh_hz, mods, 1);
+		uint64_t mods[1] = {rt->modifier};
+		params[(*n_params)++] = build_format(b, rt->spa_format, desc.width, desc.height, display.refresh_hz, mods, 1);
 	}
 }
 
@@ -458,7 +609,7 @@ static struct spa_pod *build_buffer(struct spa_pod_builder *b, uint32_t blocks, 
 
 	spa_pod_builder_push_object(b, &f[0], SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers);
 	spa_pod_builder_add(b, SPA_PARAM_BUFFERS_buffers,
-			SPA_POD_CHOICE_RANGE_Int(2, 2, 4), 0);
+			SPA_POD_CHOICE_RANGE_Int(3, 2, 4), 0);
 	spa_pod_builder_add(b, SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(blocks), 0);
 	if (size > 0) {
 		spa_pod_builder_add(b, SPA_PARAM_BUFFERS_size, SPA_POD_Int(size), 0);
@@ -525,11 +676,11 @@ static struct spa_pod *fixate_format(struct spa_pod_builder *b, enum spa_video_f
 static void
 on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 {
-	struct portal_instance *data = _data;
-	struct pw_stream *stream = data->stream;
+	struct rt *rt = _data;
+	struct pw_stream *stream = rt->stream;
 	uint8_t params_buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
-	struct spa_pod *params[5];
+	struct spa_pod *params[10];
 	int n_params = 0;
 	int framerate = display.refresh_hz;
 
@@ -543,9 +694,9 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 	fprintf(stderr, "got format:\n");
 	spa_debug_format(2, NULL, param);
 
-	spa_format_video_raw_parse(param, &data->format);
-	if (data->format.max_framerate.denom > 0) {
-		framerate = data->format.max_framerate.num / data->format.max_framerate.denom;
+	spa_format_video_raw_parse(param, &rt->format);
+	if (rt->format.max_framerate.denom > 0) {
+		framerate = rt->format.max_framerate.num / rt->format.max_framerate.denom;
 	} else {
 		framerate = 0;
 	}
@@ -553,7 +704,7 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 	
 	const struct spa_pod_prop *prop_modifier;
 	if ((prop_modifier = spa_pod_find_prop(param, NULL, SPA_FORMAT_VIDEO_modifier)) != NULL) {
-		uint32_t fourcc = xdpw_format_drm_fourcc_from_pw_format(data->format.format);
+		uint32_t fourcc = xdpw_format_drm_fourcc_from_pw_format(rt->format.format);
 		if ((prop_modifier->flags & SPA_POD_PROP_FLAG_DONT_FIXATE) > 0) {
 			const struct spa_pod *pod_modifier = &prop_modifier->value;
 			
@@ -561,10 +712,10 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 			uint64_t *modifiers = SPA_POD_CHOICE_VALUES(pod_modifier);
 			modifiers++;
 			
-			params[n_params++] = fixate_format(&b, data->format.format,
-								display.width, display.height, framerate, &desc.modifier);
+			params[n_params++] = fixate_format(&b, rt->format.format,
+								display.width, display.height, framerate, modifiers);
 			
-			build_formats(&b, data, params + n_params, &n_params);
+			build_formats(&b, rt, params + n_params, &n_params);
 			
 			pw_stream_update_params(stream, (const struct spa_pod **)params, n_params);
 			
@@ -572,15 +723,29 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 		}
 	}
 
-	data->stride = SPA_ROUND_UP_N(data->format.size.width * BPP, 4);
+	//rt->stride = SPA_ROUND_UP_N(data->format.size.width * BPP, 4);
 
-	params[n_params++] = build_buffer(&b, desc.num_planes, 0, 0, 1<<SPA_DATA_DmaBuf);
+	params[n_params++] = build_buffer(&b, rt->planes, 0, 0, 1<<SPA_DATA_DmaBuf);
 
-	params[n_params++] = spa_pod_builder_add_object(&b,
-		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
-		SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Cursor),
-		SPA_PARAM_META_size, SPA_POD_Int(
-			CURSOR_META_SIZE(cursor.width,cursor.height)));
+	if (prop_modifier) {
+		struct spa_pod_frame f;
+		
+		spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers);
+		spa_pod_builder_add(&b,
+							SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(3, 2, 4),
+							SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(1<<SPA_DATA_DmaBuf),
+							SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(rt->planes + 2), 0);
+		spa_pod_builder_prop(&b, SPA_PARAM_BUFFERS_metaType, SPA_POD_PROP_FLAG_MANDATORY);
+		spa_pod_builder_int(&b, 1 << SPA_META_SyncTimeline);
+		params[n_params++] = spa_pod_builder_pop(&b, &f);
+	}
+
+	if (rt == &basic_rt)
+		params[n_params++] = spa_pod_builder_add_object(&b,
+			SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+			SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Cursor),
+			SPA_PARAM_META_size, SPA_POD_Int(
+				CURSOR_META_SIZE(cursor.width,cursor.height)));
 
 	params[n_params++] = spa_pod_builder_add_object(&b,
 		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
@@ -591,6 +756,12 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
 		SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoTransform),
 		SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_videotransform)));
+
+	if (prop_modifier)
+			params[n_params++] = spa_pod_builder_add_object(&b,
+						SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+						SPA_PARAM_META_type, SPA_POD_Id(SPA_META_SyncTimeline),
+						SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_sync_timeline)));
 
 	pw_stream_update_params(stream, (const struct spa_pod **)params, n_params);
 }
@@ -613,7 +784,7 @@ static const struct pw_stream_events stream_events = {
 
 static void do_quit(void *userdata, int signal_number)
 {
-	//struct portal_instance *data = userdata;
+	//struct rt *data = userdata;
 	pw_loop_signal(pw_loop, false);
 }
 
@@ -624,50 +795,81 @@ int start_capture(struct ipc_start_capture_input input, int id)
 	uint8_t buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 	struct portal_instance* data = instance + id;
-	
-	data->active = true;
-	data->id = id;
+	struct rt* rt = data->rt;
 
-	pw_loop_add_signal((pw_loop), SIGINT, do_quit, data);
-	pw_loop_add_signal((pw_loop), SIGTERM, do_quit, data);
-	pw_loop_add_signal((pw_loop), SIGHUP, do_quit, data);
+	if (!rt->stream) {
+		if (rt != &basic_rt)
+			create_rt_dmabuf_texture(rt);
+		
+		pw_loop_add_signal((pw_loop), SIGINT, do_quit, rt);
+		pw_loop_add_signal((pw_loop), SIGTERM, do_quit, rt);
+		pw_loop_add_signal((pw_loop), SIGHUP, do_quit, rt);
 
-	data->stream = pw_stream_new(pw_core, display.name,
-		pw_properties_new(
-			PW_KEY_MEDIA_CLASS, "Video/Source",
-			PW_KEY_NODE_SUPPORTS_REQUEST, "1",
-			NULL));
+		rt->stream = pw_stream_new(pw_core, display.name,
+			pw_properties_new(
+				PW_KEY_MEDIA_CLASS, "Video/Source",
+				PW_KEY_NODE_SUPPORTS_REQUEST, "1",
+				NULL));
 
-	build_formats(&b, data, params, &n_params);
-	
+		build_formats(&b, rt, params, &n_params);
+		
 
-	pw_stream_add_listener(data->stream,
-			       &data->stream_listener,
-			       &stream_events,
-			       data);
+		pw_stream_add_listener(rt->stream,
+					   &rt->stream_listener,
+					   &stream_events,
+					   rt);
 
-	pw_stream_connect(data->stream,
+		rt->node_id = SPA_ID_INVALID;
+	}
+
+	pw_stream_connect(rt->stream,
 			  PW_DIRECTION_OUTPUT,
 			  PW_ID_ANY,
 			  PW_STREAM_FLAG_DRIVER |
 			  PW_STREAM_FLAG_ALLOC_BUFFERS,
 			  (const struct spa_pod**)params, n_params);
-
-	data->node_id = SPA_ID_INVALID;
+	
+	data->active = true;
+	data->id = id;
+	
+	rt->uses++;
 
 	return 0;
 }
 
-void stop_capture(struct portal_instance* data) {
+void stop_instance(struct portal_instance* data, bool send_back) {
 	if (!data->active) return;
 	
 	data->active = false;
 	
-	pw_stream_flush(data->stream, false);
-	pw_stream_disconnect(data->stream);
-	pw_stream_destroy(data->stream);
+	if (!--data->rt->uses)
+		stop_rt(data->rt, true);
 	
 	instances--;
+	
+	if (send_back) {
+		ipc_buffer.id = IPC_STOP_CAP_IN;
+		ipc_buffer.stop_capture_input.node_id = data->rt->node_id;
+		write(portal_fd_write, &ipc_buffer, sizeof(ipc_buffer));
+	}
+}
+void stop_rt(struct rt* rt, bool from_instance) {
+	if (!rt->stream) return;
+	
+	if (!from_instance) {
+		for (int i = 0; i < MAX_SESSIONS; i++)
+			if (instance[i].active && instance[i].rt == rt)
+				stop_instance(instance + i, true);
+		return;
+	}
+	
+	pw_stream_flush(rt->stream, false);
+	pw_stream_disconnect(rt->stream);
+	pw_stream_destroy(rt->stream);
+	rt->stream = NULL;
+	
+	if (rt != &basic_rt)
+		delete_rt_dmabuf_texture(rt);
 }
 
 
@@ -744,7 +946,6 @@ int start_capture_ipc_event(struct ipc_start_capture_input start_capture_input) 
 	int instance_id;
 	
 	ipc_buffer.id = IPC_START_CAP_OUT;
-	ipc_buffer.start_capture_output.ret = -1;
 	
 	for (instance_id = 0; instance_id < MAX_SESSIONS; instance_id++) {
 		if (!instance[instance_id].active) {
@@ -752,8 +953,18 @@ int start_capture_ipc_event(struct ipc_start_capture_input start_capture_input) 
 		}
 	}
 	
-	if (instance_id == MAX_SESSIONS)
+	if (instance_id == MAX_SESSIONS) {
+		ipc_buffer.start_capture_output.ret = -1;
 		goto err;
+	}
+	
+	cast = instance + instance_id;
+	
+	cast->cursor_mode = ipc_buffer.start_capture_input.cursor_mode;
+	cast->rt_id = cast->cursor_mode != EMBEDDED ? 0 : 1;
+	cast->rt = rts[cast->rt_id];
+	
+	ipc_buffer.start_capture_output.ret = -1;
 	
 	// First time setup
 	if (first) {
@@ -771,15 +982,99 @@ int start_capture_ipc_event(struct ipc_start_capture_input start_capture_input) 
 		drmtap_get_cursor(ctx, &cursor);
 		
 		framerate = display.refresh_hz;
+		
+		eglBindAPI(EGL_OPENGL_API);
+		egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+		if (!egl_display) goto err;
+		if (!eglInitialize(egl_display, NULL, NULL)) goto err;
+		// Create EGL context
+		EGLint context_attribs[] = {
+			EGL_CONTEXT_MAJOR_VERSION, 1,
+			EGL_CONTEXT_MINOR_VERSION, 1,
+			EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
+			EGL_NONE
+		};
+		egl_context = eglCreateContext(egl_display, NULL, EGL_NO_CONTEXT, context_attribs);
+		if (!egl_context) goto err;
+		if (!eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context)) goto err;
+		
+		// enable debug callback
+		glDebugMessageCallback(&DebugCallback, NULL);
+		glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+		
+#ifdef DMABUF_EXPLICIT_LOAD
+		eglExportDMABUFImageQueryMESA = (PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC)eglGetProcAddress("eglExportDMABUFImageQueryMESA");
+		eglExportDMABUFImageMESA = (PFNEGLEXPORTDMABUFIMAGEMESAPROC)eglGetProcAddress("eglExportDMABUFImageMESA");
+		if (!eglExportDMABUFImageQueryMESA || !eglExportDMABUFImageMESA) goto err;
+#endif
+		
+		// Setup RTs
+		basic_rt.planes = desc.num_planes;
+		basic_rt.fourcc = desc.format;
+		basic_rt.spa_format = xdpw_format_pw_from_drm_fourcc(basic_rt.fourcc);
+		basic_rt.modifier = desc.modifier;
+		for (int i = 0; i < basic_rt.planes; i++) {
+			basic_rt.dmabuf_fd[i] = desc.dma_buf_fd;
+			basic_rt.stride[i] = desc.pitches[i];
+			basic_rt.offset[i] = desc.offsets[i];
+		}
+		
+		EGLAttrib attribute_list[] = {
+			EGL_WIDTH, desc.width,
+			EGL_HEIGHT, desc.height,
+			EGL_LINUX_DRM_FOURCC_EXT, basic_rt.fourcc,
+			
+			EGL_DMA_BUF_PLANE0_FD_EXT, basic_rt.dmabuf_fd[0],
+			EGL_DMA_BUF_PLANE0_OFFSET_EXT, basic_rt.offset[0],
+			EGL_DMA_BUF_PLANE0_PITCH_EXT, basic_rt.stride[0],
+			EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, (uint32_t)(basic_rt.modifier & ((((uint64_t)1) << 33) - 1)),
+			EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, (uint32_t)((basic_rt.modifier>>32) & ((((uint64_t)1) << 33) - 1)),
+			
+			EGL_DMA_BUF_PLANE1_FD_EXT, basic_rt.dmabuf_fd[1],
+			EGL_DMA_BUF_PLANE1_OFFSET_EXT, basic_rt.offset[1],
+			EGL_DMA_BUF_PLANE1_PITCH_EXT, basic_rt.stride[1],
+			EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT, (uint32_t)(basic_rt.modifier & ((((uint64_t)1) << 33) - 1)),
+			EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT, (uint32_t)((basic_rt.modifier>>32) & ((((uint64_t)1) << 33) - 1)),
+			
+			EGL_DMA_BUF_PLANE2_FD_EXT, basic_rt.dmabuf_fd[2],
+			EGL_DMA_BUF_PLANE2_OFFSET_EXT, basic_rt.offset[2],
+			EGL_DMA_BUF_PLANE2_PITCH_EXT, basic_rt.stride[2],
+			EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT, (uint32_t)(basic_rt.modifier & ((((uint64_t)1) << 33) - 1)),
+			EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT, (uint32_t)((basic_rt.modifier>>32) & ((((uint64_t)1) << 33) - 1)),
+			
+			EGL_DMA_BUF_PLANE3_FD_EXT, basic_rt.dmabuf_fd[3],
+			EGL_DMA_BUF_PLANE3_OFFSET_EXT, basic_rt.offset[3],
+			EGL_DMA_BUF_PLANE3_PITCH_EXT, basic_rt.stride[3],
+			EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT, (uint32_t)(basic_rt.modifier & ((((uint64_t)1) << 33) - 1)),
+			EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT, (uint32_t)((basic_rt.modifier>>32) & ((((uint64_t)1) << 33) - 1)),
+			
+			EGL_NONE};
+		attribute_list[3*2 + 5*2*(basic_rt.planes)] = EGL_NONE;
+		basic_rt.egl_image = eglCreateImage(egl_display,
+										NULL,
+										EGL_LINUX_DMA_BUF_EXT,
+										(EGLClientBuffer)NULL,
+										attribute_list);
+		if (!basic_rt.egl_image) goto err;
+		glGenTextures(1, &basic_rt.gl_texture);
+		glBindTexture(GL_TEXTURE_2D, basic_rt.gl_texture);
+		glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, basic_rt.egl_image);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		
+		glGenTextures(1, &cursor_texture);
+		glBindTexture(GL_TEXTURE_2D, cursor_texture);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, cursor.width, cursor.height, 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, cursor.pixels);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		
+		embed_cursor_rt.drawfunc = rt_draw_embed_cursor;
 	}
-	
-	cast = instance + instance_id;
-	instances++;
 	
 	ipc_buffer.start_capture_output.ret = start_capture(start_capture_input, instance_id);
 	if (ipc_buffer.start_capture_output.ret < 0) goto err;
 	
-	while (cast->node_id == SPA_ID_INVALID && cast->state != PW_STREAM_STATE_PAUSED) {
+	while (cast->rt->node_id == SPA_ID_INVALID && cast->rt->state != PW_STREAM_STATE_PAUSED) {
 		int ret = pw_loop_iterate(pw_loop, 0);
 		if (ret < 0) {
 			logprint(ERROR, "pipewire_loop_iterate failed: %s", spa_strerror(ret));
@@ -787,8 +1082,8 @@ int start_capture_ipc_event(struct ipc_start_capture_input start_capture_input) 
 		}
 	}
 	
-	ipc_buffer.start_capture_output.node_id = cast->node_id;
-	ipc_buffer.start_capture_output.pipewire_serial = cast->pipewire_serial;
+	ipc_buffer.start_capture_output.node_id = cast->rt->node_id;
+	ipc_buffer.start_capture_output.pipewire_serial = cast->rt->pipewire_serial;
 	err:;
 	if (write(portal_fd_write, &ipc_buffer, sizeof(ipc_buffer)) != sizeof(ipc_buffer)) {
 		printf("IPC IPC_START_CAP_OUT FAILED!\n");
@@ -797,6 +1092,9 @@ int start_capture_ipc_event(struct ipc_start_capture_input start_capture_input) 
 	
 	if (first && ipc_buffer.start_capture_output.ret == 0)
 		update_timer();
+	
+	if (ipc_buffer.start_capture_output.ret == 0)
+		instances++;
 	
 	return ipc_buffer.start_capture_output.ret;
 }
@@ -867,13 +1165,16 @@ int main(int argc, char* argv[]) {
 			
 			switch ((int)ipc_buffer.id) {
 				case IPC_START_CAP_IN:
-					start_capture_ipc_event(ipc_buffer.start_capture_input);
+					if (start_capture_ipc_event(ipc_buffer.start_capture_input) && !instances) {
+						printf("failed to start capture!\n");
+						goto error;
+					}
 					break;
 				case IPC_STOP_CAP_IN: {
 					bool stopped = false;
 					for (int i = 0; i < MAX_SESSIONS; i++) {
-						if (instance[i].active && instance[i].node_id == ipc_buffer.stop_capture_input.node_id) {
-							stop_capture(instance + i);
+						if (instance[i].active && instance[i].rt->node_id == ipc_buffer.stop_capture_input.node_id) {
+							stop_instance(instance + i, false);
 							stopped = true;
 							break;
 						}
@@ -889,13 +1190,13 @@ int main(int argc, char* argv[]) {
 						goto error;
 					}
 					
-					if (!instances)
-						goto finish;
-					
 					break;
 				}
 			}
 		}
+		
+		if (!instances)
+			goto finish;
 	}
 	
 	error:;
@@ -905,6 +1206,26 @@ int main(int argc, char* argv[]) {
 		drmtap_frame_release(ctx, &frame);
 		drmtap_cursor_release(ctx, &cursor);
 		drmtap_close(ctx);
+		
+		glDeleteTextures(1, &cursor_texture);
+		cursor_texture = 0;
+		
+		if (basic_rt.egl_image) {
+			eglDestroyImage(egl_display, basic_rt.egl_image);
+			basic_rt.egl_image = NULL;
+		}
+		if (basic_rt.gl_texture) {
+			glDeleteTextures(1, &basic_rt.gl_texture);
+			basic_rt.gl_texture = 0;
+		}
+		// skip basic_rt
+		for (int i = 1; i < N_RTS; i++)
+			delete_rt_dmabuf_texture(rts[i]);
+		
+		if (egl_context)
+			eglDestroyContext(egl_display, egl_context);
+		if (egl_display)
+			eglTerminate(egl_display);
 	}
 	
 	xdpw_pwr_context_destroy();

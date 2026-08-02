@@ -141,8 +141,10 @@ void stop_capture(struct portal_session* sess, uint32_t node_id) {
 	if (!sess->connections) return;
 	
 	if (sess->ipc_fd_write != -1 && sess->ipc_fd_read != -1) {
-		if (write(sess->ipc_fd_write, &ipc_buffer, sizeof(ipc_buffer)) != sizeof(ipc_buffer)) goto ipc_err;
-		if (read(sess->ipc_fd_read, &ipc_buffer, sizeof(ipc_buffer)) != sizeof(ipc_buffer)) goto ipc_err;
+		if (node_id != 0) {
+			if (write(sess->ipc_fd_write, &ipc_buffer, sizeof(ipc_buffer)) != sizeof(ipc_buffer)) goto ipc_err;
+			if (read(sess->ipc_fd_read, &ipc_buffer, sizeof(ipc_buffer)) != sizeof(ipc_buffer)) goto ipc_err;
+		}
 		
 		if (!--sess->connections) {
 			waitpid(sess->pid, NULL, 0);
@@ -163,7 +165,7 @@ void stop_capture(struct portal_session* sess, uint32_t node_id) {
 	
 	ipc_err:;
 	printf("IPC IPC_STOP_CAP_IN FAILED!\n");
-	exit(1);
+	//exit(1);
 }
 
 // DBUS
@@ -1095,12 +1097,16 @@ int main(int argc, char *argv[]) {
 		for (int s = 0; s < MAX_SESSIONS; s++) {
 			if (pollfds[s + POLLS].revents & POLLHUP) {
 				logprint(INFO, "event-loop: disconnected from session %i", s);
+				cast.session[s].connections = 1;
+				stop_capture(cast.session + s, 0);
+				cast.session[s].connections = 0;
 			}
 			if (pollfds[s + POLLS].revents & POLLIN) {
 				logprint(TRACE, "event-loop: got session %i event", s);
 				
 				switch ((int)ipc_buffer.id) {
-					// Nothing yet
+					case IPC_STOP_CAP_IN:
+						stop_capture(cast.session + s, ipc_buffer.stop_capture_input.node_id);
 				}
 			}
 		}
