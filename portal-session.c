@@ -427,11 +427,21 @@ void update_timer(void) {
 			timer, &timeout, &interval, false);
 }
 
+
+#include "drmtapfix.h" // drmtap_helper_stop(ctx);
+
 static void on_timeout(void *userdata, uint64_t expirations)
 {
 	bool any_streaming = false;
 	
 	pw_log_trace("timeout");
+	
+	// Kill the helper every time
+	// It sometimes spawns randomly if
+	// a cursor grab failed 1 time for whatever reason
+	// and from then on uses the helper path
+	// which is slower and fails to return cursor position.
+	drmtap_helper_stop(ctx);
 	
 	drmtap_cursor_release(ctx, &cursor);
 	drmtap_get_cursor(ctx, &cursor);

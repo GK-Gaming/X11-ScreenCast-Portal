@@ -1,6 +1,6 @@
 
 #define _GNU_SOURCE
-#include "both.h"
+#include "portal.h"
 
 char portal_exec_dir[PATH_MAX];
 
