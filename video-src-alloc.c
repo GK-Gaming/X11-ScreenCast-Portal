@@ -947,7 +947,7 @@ int start_capture_ipc_event(struct ipc_start_capture_input start_capture_input) 
 	
 	cast = instance + instance_id;
 	
-	cast->cursor_mode = ipc_buffer.start_capture_input.cursor_mode;
+	cast->cursor_mode = start_capture_input.cursor_mode;
 	cast->rt_id = cast->cursor_mode != EMBEDDED ? 0 : 1;
 	cast->rt = rts[cast->rt_id];
 	
@@ -957,8 +957,11 @@ int start_capture_ipc_event(struct ipc_start_capture_input start_capture_input) 
 	if (first) {
 		display = start_capture_input.display;
 		
+		printf("open: %s\n", start_capture_input.device);
+		
 		drmtap_config cfg = {0};
 		cfg.debug = 0;
+		cfg.device_path = start_capture_input.device;
 		cfg.crtc_id = display.crtc_id;
 		ctx = drmtap_open(&cfg);
 		if (!ctx)

@@ -3,8 +3,8 @@
 #include "both.h"
 
 
-drmtap_ctx* displays_ctx;
-drmtap_display displays[8];
+drmtap_display displays[32];
+char displays_device[32][64];
 int n_displays;
 
 
@@ -139,6 +139,7 @@ void stop_capture(struct portal_session* sess, uint32_t node_id) {
 	ipc_buffer.stop_capture_input.node_id = node_id;
 	
 	if (!sess->connections) return;
+	sess->connections--;
 	
 	if (sess->ipc_fd_write != -1 && sess->ipc_fd_read != -1) {
 		if (node_id != 0) {
@@ -146,7 +147,7 @@ void stop_capture(struct portal_session* sess, uint32_t node_id) {
 			if (read(sess->ipc_fd_read, &ipc_buffer, sizeof(ipc_buffer)) != sizeof(ipc_buffer)) goto ipc_err;
 		}
 		
-		if (!(sess->connections -1)) {
+		if (!sess->connections) {
 			waitpid(sess->pid, NULL, 0);
 			
 			close(sess->ipc_fd_write);
@@ -154,7 +155,7 @@ void stop_capture(struct portal_session* sess, uint32_t node_id) {
 		}
 	}
 	
-	if (!--sess->connections) {
+	if (!sess->connections) {
 		((struct portal_state*) (sess->state))->sessions--;
 		if (sess->device) {
 			free(sess->device);
@@ -606,14 +607,38 @@ static int method_screencast_select_sources(sd_bus_message *msg, void *data,
 	
 	
 	// ---------------- SELECTION HAPPENS HERE!!
-	n_displays = drmtap_list_displays(displays_ctx, displays, 8);
+	{
+		drmtap_config cfg = {0};
+		drmtap_device device[8];
+		int n_devices;
+		
+		n_devices = drmtap_list_devices(device, 8);
+		
+		n_displays = 0;
+		for (int i = 0; i < n_devices; i++) {
+			int o_n_displays = n_displays;
+			drmtap_ctx* displays_ctx;
+			cfg.device_path = device[i].path;
+			displays_ctx = drmtap_open(&cfg);
+			if (!displays_ctx) continue;
+			n_displays += drmtap_list_displays(displays_ctx, displays+n_displays, 32-n_displays);
+			for (int d = o_n_displays; d < n_displays; d++)
+				strcpy(displays_device[d], cfg.device_path);
+		}
+	}
 	drmtap_display* target = NULL;
 	char* device = "";
+	
+	if (!n_displays) {
+		printf("failed to find any usable display\n");
+		return -1;
+	}
 	
 	if (restore_data.version)
 		for (int i = 0; i < n_displays; i++)
 			if (!strcmp(restore_data.output_name, displays[i].name)) {
 				target = displays + i;
+				device = displays_device[i];
 				break;
 			}
 	
@@ -650,6 +675,7 @@ static int method_screencast_select_sources(sd_bus_message *msg, void *data,
 		for (int i = 0; i < n_displays; i++)
 			if (!strcmp(chose_txt, displays[i].name)) {
 				target = displays + i;
+				device = displays_device[i];
 				break;
 			}
 		
@@ -1037,12 +1063,6 @@ void dbus_basic_setup(struct portal_state *cast) {
 int main(int argc, char *argv[]) {
 	struct portal_state cast = {0};
 	
-	drmtap_config cfg = {0};
-	cfg.debug = 0;
-	displays_ctx = drmtap_open(&cfg);
-	
-	n_displays = drmtap_list_displays(displays_ctx, displays, 8);
-	
 	cast.source_types = MONITOR;
 	cast.cursor_modes = HIDDEN | EMBEDDED | METADATA;
 	cast.screencast_version = XDP_CAST_PROTO_VER;
@@ -1134,8 +1154,6 @@ int main(int argc, char *argv[]) {
 	}
 	
 	error:;
-	
-	drmtap_close(displays_ctx);
 	
 	return 0;
 }
