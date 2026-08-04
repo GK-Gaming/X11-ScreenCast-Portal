@@ -8,9 +8,9 @@ in your system directory (/lib or /usr/local/lib) or in here
 MAKEFILE:
 
 using just "make" will build the files
-"make session-caps" will give the session program CAP_SYS_ADMIN
+"make session-caps" will do "make" and give the session program CAP_SYS_ADMIN
 "make run" will do "make session-caps" and run the portal
-"make install" will do "make" and "make session-caps" and install the portal files to your system and restart xdg-desktop-portal
+"make install" will do "make session-caps" and install the portal files to your system and restart xdg-desktop-portal
 
 MANUAL INSTALL:
 
@@ -28,7 +28,7 @@ put x11-portals.conf in /usr/share/xdg-desktop-portal/
 put x11.portal in /usr/share/xdg-desktop-portal/portals/
 put org.freedesktop.impl.portal.desktop.x11.service in /usr/share/dbus-1/services/
 put xdg-desktop-portal-x11.service in /usr/lib/systemd/user/
-put xdg-desktop-portal-x11 & xdg-desktop-portal-x11-session in /lib/
+put xdg-desktop-portal-x11 & xdg-desktop-portal-x11-session in /usr/lib/
 
 after that (hopefully to portal files i made work outside i3)
 systemctl --user restart xdg-desktop-portal
